@@ -1,0 +1,297 @@
+name: Build fwjz VIP Menu UI
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Create Source Code
+        run: |
+          cat << 'EOF' > fwjz.m
+          #import <UIKit/UIKit.h>
+          #import <QuartzCore/QuartzCore.h>
+          #import <mach/mach.h>
+
+          @interface FWJZMenuUI : NSObject <UITextFieldDelegate>
+          @property (nonatomic, strong) UIWindow *overlayWindow;
+          @property (nonatomic, strong) UIWindow *menuWindow;
+          @property (nonatomic, strong) UIView *menuContainer;
+          @property (nonatomic, strong) UILabel *statusLabel;
+          @property (nonatomic, strong) UIButton *floatingBtn;
+          @property (nonatomic, strong) CADisplayLink *displayLink;
+          @property (nonatomic, assign) NSInteger frameCount;
+          @property (nonatomic, assign) CFTimeInterval lastTime;
+          @property (nonatomic, strong) NSString *adminTag;
+          @property (nonatomic, assign) BOOL streamMode;
+          @property (nonatomic, assign) BOOL showBar;
+          + (instancetype)shared;
+          - (void)setup;
+          @end
+
+          @implementation FWJZMenuUI
+
+          + (instancetype)shared {
+              static FWJZMenuUI *inst = nil;
+              static dispatch_once_t onceToken;
+              dispatch_once(&onceToken, ^{ inst = [[FWJZMenuUI alloc] init]; });
+              return inst;
+          }
+
+          - (void)setup {
+              self.adminTag = @"fwjz";
+              self.streamMode = NO;
+              self.showBar = YES;
+              self.frameCount = 0;
+              self.lastTime = CACurrentMediaTime();
+
+              [UIDevice currentDevice].batteryMonitoringEnabled = YES;
+
+              // 1. Tạo Window chính cho Floating Button & Status Bar
+              self.overlayWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+              self.overlayWindow.windowLevel = UIWindowLevelAlert + 10.0;
+              self.overlayWindow.backgroundColor = [UIColor clearColor];
+              self.overlayWindow.userInteractionEnabled = YES;
+
+              UIViewController *rootVC = [[UIViewController alloc] init];
+              rootVC.view.backgroundColor = [UIColor clearColor];
+              self.overlayWindow.rootViewController = rootVC;
+
+              // Thanh hiển thị trạng thái phía trên (Status Bar)
+              CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
+              self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(20, 10, screenW - 40, 24)];
+              self.statusLabel.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.4];
+              self.statusLabel.layer.cornerRadius = 6.0;
+              self.statusLabel.layer.masksToBounds = YES;
+              self.statusLabel.textAlignment = NSTextAlignmentCenter;
+              self.statusLabel.font = [UIFont boldSystemFontOfSize:11.5];
+              [rootVC.view addSubview:self.statusLabel];
+
+              // Icon Menu Anime nổi (Floating Button)
+              self.floatingBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+              self.floatingBtn.frame = CGRectMake(25, 120, 50, 50);
+              self.floatingBtn.layer.cornerRadius = 25.0;
+              self.floatingBtn.layer.masksToBounds = YES;
+              self.floatingBtn.layer.borderWidth = 2.0;
+              self.floatingBtn.layer.borderColor = [UIColor cyanColor].CGColor;
+              self.floatingBtn.backgroundColor = [UIColor colorWithRed:0.1 green:0.1 blue:0.15 alpha:0.9];
+              [self.floatingBtn setTitle:@"⚡" forState:UIControlStateNormal];
+              self.floatingBtn.titleLabel.font = [UIFont boldSystemFontOfSize:22];
+
+              UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(onBtnPan:)];
+              [self.floatingBtn addGestureRecognizer:pan];
+              [self.floatingBtn addTarget:self action:@selector(toggleMenu) forControlEvents:UIControlEventTouchUpInside];
+              [rootVC.view addSubview:self.floatingBtn];
+
+              [self.overlayWindow makeKeyAndVisible];
+
+              // 2. Tạo Menu Cài Đặt
+              [self buildMenuWindow];
+
+              // 3. Theo dõi Stream Mode (Ẩn khi đang quay màn hình)
+              [[NSNotificationCenter defaultCenter] addObserver:self 
+                                                       selector:@selector(screenCaptureChanged) 
+                                                           name:UIScreenCapturedDidChangeNotification 
+                                                         object:nil];
+
+              // 4. Timer cập nhật FPS, Ngày giờ, Pin
+              self.displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(onTick:)];
+              [self.displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+          }
+
+          - (void)onBtnPan:(UIPanGestureRecognizer *)p {
+              CGPoint tr = [p translationInView:nil];
+              self.floatingBtn.center = CGPointMake(self.floatingBtn.center.x + tr.x, self.floatingBtn.center.y + tr.y);
+              [p setTranslation:CGPointZero inView:nil];
+          }
+
+          - (void)onTick:(CADisplayLink *)l {
+              self.frameCount++;
+              CFTimeInterval now = CACurrentMediaTime();
+              if (now - self.lastTime >= 1.0) {
+                  NSInteger fps = (NSInteger)round(self.frameCount / (now - self.lastTime));
+                  self.frameCount = 0;
+                  self.lastTime = now;
+
+                  if (self.showBar) {
+                      NSDateFormatter *df = [[NSDateFormatter alloc] init];
+                      [df setLocale:[[NSLocale alloc] initWithLocaleIdentifier:@"vi_VN"]];
+                      [df setDateFormat:@"EEEE, dd/MM/yyyy HH:mm:ss"];
+                      NSString *dateStr = [df stringFromDate:[NSDate date]];
+
+                      float battery = [UIDevice currentDevice].batteryLevel * 100;
+                      if (battery < 0) battery = 100.0;
+
+                      // Format chữ tương tự mẫu: [tag] FPS | Ngày Giờ | Pin
+                      NSMutableAttributedString *str = [[NSMutableAttributedString alloc] 
+                          initWithString:[NSString stringWithFormat:@"[%@] %ld FPS | %@ | Pin: %.0f%%", self.adminTag, (long)fps, dateStr, battery]];
+                      
+                      [str addAttribute:NSForegroundColorAttributeName value:[UIColor magentaColor] range:NSMakeRange(0, self.adminTag.length + 2)];
+                      self.statusLabel.attributedText = str;
+                  }
+              }
+          }
+
+          - (void)buildMenuWindow {
+              self.menuWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+              self.menuWindow.windowLevel = UIWindowLevelAlert + 20.0;
+              self.menuWindow.backgroundColor = [UIColor clearColor];
+
+              UIViewController *menuVC = [[UIViewController alloc] init];
+              menuVC.view.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.45];
+              self.menuWindow.rootViewController = menuVC;
+
+              CGFloat w = 310; CGFloat h = 380;
+              CGFloat x = (self.menuWindow.bounds.size.width - w) / 2;
+              CGFloat y = (self.menuWindow.bounds.size.height - h) / 2;
+
+              self.menuContainer = [[UIView alloc] initWithFrame:CGRectMake(x, y, w, h)];
+              self.menuContainer.backgroundColor = [UIColor colorWithRed:0.08 green:0.08 blue:0.12 alpha:0.95];
+              self.menuContainer.layer.cornerRadius = 16.0;
+              self.menuContainer.layer.borderWidth = 1.5;
+              self.menuContainer.layer.borderColor = [UIColor cyanColor].CGColor;
+              self.menuContainer.layer.masksToBounds = YES;
+
+              UIBlurEffect *blur = [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark];
+              UIVisualEffectView *blurView = [[UIVisualEffectView alloc] initWithEffect:blur];
+              blurView.frame = self.menuContainer.bounds;
+              [self.menuContainer addSubview:blurView];
+              [menuVC.view addSubview:self.menuContainer];
+
+              // Title Menu
+              UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(0, 16, w, 22)];
+              title.text = @"⚡ FWJZ ANIME VIP MENU ⚡";
+              title.textColor = [UIColor whiteColor];
+              title.font = [UIFont boldSystemFontOfSize:15];
+              title.textAlignment = NSTextAlignmentCenter;
+              [self.menuContainer addSubview:title];
+
+              // Đổi Tag hiển thị
+              UITextField *tf = [[UITextField alloc] initWithFrame:CGRectMake(20, 50, w - 40, 36)];
+              tf.backgroundColor = [UIColor colorWithWhite:0.2 alpha:0.6];
+              tf.textColor = [UIColor cyanColor];
+              tf.layer.cornerRadius = 8.0;
+              tf.textAlignment = NSTextAlignmentCenter;
+              tf.text = self.adminTag;
+              tf.delegate = self;
+              [tf addTarget:self action:@selector(tagChanged:) forControlEvents:UIControlEventEditingChanged];
+              [self.menuContainer addSubview:tf];
+
+              // Danh sách Switch
+              [self addRow:@"Hiện thanh Status Bar" y:98 sel:@selector(toggleBar:) on:self.showBar];
+              [self addRow:@"Stream Mode (Ẩn khi quay)" y:142 sel:@selector(toggleStream:) on:self.streamMode];
+
+              // Card thông tin Admin
+              UIView *card = [[UIView alloc] initWithFrame:CGRectMake(20, 196, w - 40, 80)];
+              card.backgroundColor = [UIColor colorWithWhite:0.15 alpha:0.7];
+              card.layer.cornerRadius = 10.0;
+              card.layer.borderWidth = 1.0;
+              card.layer.borderColor = [UIColor colorWithWhite:0.3 alpha:0.8].CGColor;
+              [self.menuContainer addSubview:card];
+
+              UILabel *lblAdmin = [[UILabel alloc] initWithFrame:CGRectMake(12, 8, card.bounds.size.width - 24, 18)];
+              lblAdmin.text = @"👑 DEVELOPER : FWJZ";
+              lblAdmin.textColor = [UIColor cyanColor];
+              lblAdmin.font = [UIFont boldSystemFontOfSize:12.5];
+              [card addSubview:lblAdmin];
+
+              UILabel *lblInfo = [[UILabel alloc] initWithFrame:CGRectMake(12, 30, card.bounds.size.width - 24, 40)];
+              lblInfo.numberOfLines = 2;
+              lblInfo.textColor = [UIColor colorWithWhite:0.9 alpha:1.0];
+              lblInfo.font = [UIFont systemFontOfSize:11.5];
+              lblInfo.text = @"• TikTok: _fwjz\n• Telegram: @fwjz0";
+              [card addSubview:lblInfo];
+
+              // Nút Đóng Menu
+              UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+              closeBtn.frame = CGRectMake(20, 290, w - 40, 40);
+              closeBtn.backgroundColor = [UIColor colorWithRed:0.9 green:0.2 blue:0.35 alpha:0.9];
+              [closeBtn setTitle:@"ĐÓNG MENU" forState:UIControlStateNormal];
+              [closeBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+              closeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:13.5];
+              closeBtn.layer.cornerRadius = 8.0;
+              [closeBtn addTarget:self action:@selector(toggleMenu) forControlEvents:UIControlEventTouchUpInside];
+              [self.menuContainer addSubview:closeBtn];
+
+              self.menuWindow.hidden = YES;
+          }
+
+          - (void)addRow:(NSString *)title y:(CGFloat)y sel:(SEL)sel on:(BOOL)isOn {
+              UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(25, y, 180, 31)];
+              lbl.text = title;
+              lbl.textColor = [UIColor whiteColor];
+              lbl.font = [UIFont systemFontOfSize:13.0];
+              [self.menuContainer addSubview:lbl];
+
+              UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(self.menuContainer.bounds.size.width - 75, y, 51, 31)];
+              sw.on = isOn;
+              sw.onTintColor = [UIColor colorWithRed:0.2 green:0.8 blue:0.6 alpha:1.0];
+              [sw addTarget:self action:sel forControlEvents:UIControlEventValueChanged];
+              [self.menuContainer addSubview:sw];
+          }
+
+          - (void)toggleBar:(UISwitch *)sw {
+              self.showBar = sw.on;
+              self.statusLabel.hidden = !sw.on;
+          }
+
+          - (void)toggleStream:(UISwitch *)sw {
+              self.streamMode = sw.on;
+              [self screenCaptureChanged];
+          }
+
+          - (void)screenCaptureChanged {
+              if (self.streamMode && [UIScreen mainScreen].isCaptured) {
+                  self.overlayWindow.hidden = YES;
+                  self.menuWindow.hidden = YES;
+              } else {
+                  self.overlayWindow.hidden = NO;
+              }
+          }
+
+          - (void)tagChanged:(UITextField *)tf {
+              self.adminTag = tf.text.length > 0 ? tf.text : @"fwjz";
+          }
+
+          - (BOOL)textFieldShouldReturn:(UITextField *)tf {
+              [tf resignFirstResponder];
+              return YES;
+          }
+
+          - (void)toggleMenu {
+              BOOL show = self.menuWindow.hidden;
+              if (show) {
+                  [self.menuWindow makeKeyAndVisible];
+                  self.menuWindow.hidden = NO;
+              } else {
+                  self.menuWindow.hidden = YES;
+                  [self.overlayWindow makeKeyAndVisible];
+              }
+          }
+
+          @end
+
+          __attribute__((constructor)) static void init(void) {
+              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                  [[FWJZMenuUI shared] setup];
+              });
+          }
+          EOF
+
+      - name: Compile dylib directly with Clang
+        run: |
+          xcrun -sdk iphoneos clang -target arm64-apple-ios14.0 \
+            -dynamiclib -fobjc-arc -Wno-deprecated-declarations \
+            -framework UIKit -framework QuartzCore -framework CoreGraphics \
+            fwjz.m -o fwjz.dylib
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fwjz-dylib
+          path: fwjz.dylib
